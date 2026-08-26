@@ -4,9 +4,10 @@ use credx::claim::{ClaimType, ClaimValidator, HashedClaim, NumberClaim, Revocati
 use credx::credential::{ClaimSchema, CredentialBundle, CredentialSchema};
 use credx::indexmap::IndexMap;
 use credx::issuer::{Issuer, IssuerPublic};
+use credx::knox::accumulator::vb20::{Accumulator, MembershipWitness};
 use credx::knox::bbs::BbsScheme;
 use credx::presentation::{Presentation, PresentationSchema};
-use credx::statement::SignatureStatement;
+use credx::statement::{RevocationStatement, SignatureStatement};
 use credx::CredxResult;
 use rand::{thread_rng, RngCore};
 
@@ -14,6 +15,8 @@ pub type DemoScheme = BbsScheme;
 pub type PresentationNonce = [u8; 32];
 
 const CREDENTIAL_STATEMENT_ID: &str = "employee-credential-signature";
+const REVOCATION_STATEMENT_ID: &str = "employee-credential-revocation";
+const REVOCATION_CLAIM_INDEX: usize = 0;
 
 /// Values supplied by the issuer when creating the demo credential.
 pub struct EmployeeCredentialValues<'a> {
@@ -23,13 +26,22 @@ pub struct EmployeeCredentialValues<'a> {
     pub employee_number: u64,
 }
 
-/// Public verifier request passed directly to the holder in Stage 1.
+/// Public verifier request passed directly to a holder.
 ///
 /// A later transport layer can carry this data without changing the crypto calls.
 pub struct PresentationRequest {
     pub credential_statement_id: String,
     pub schema: PresentationSchema<DemoScheme>,
     pub nonce: PresentationNonce,
+}
+
+/// The accumulator value made available by the issuer.
+///
+/// This wrapper is the in-memory stand-in for the value Stage 3 will publish to
+/// Fabric. Its field stays private so holders obtain it through the read seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublishedAccumulator {
+    value: Accumulator,
 }
 
 /// Build the ordered claim schema used by both issuer and verifier.
@@ -72,7 +84,7 @@ pub fn create_credential_schema() -> CredxResult<CredentialSchema> {
 
     CredentialSchema::new(
         Some("employee-credential"),
-        Some("Stage 1 in-memory AnonCreds v2 credential"),
+        Some("In-memory AnonCreds v2 employee credential"),
         &[],
         &claims,
     )
@@ -96,22 +108,71 @@ pub fn issue_credential(
     ])
 }
 
-/// Build the verifier's disclosure request and fresh challenge nonce.
+/// Revoke one credential and move the issuer's accumulator.
+pub fn revoke_credential(issuer: &mut Issuer<DemoScheme>, credential_id: &str) -> CredxResult<()> {
+    issuer.revoke_credentials(&[RevocationClaim::from(credential_id)])
+}
+
+/// Publish the issuer's exact current accumulator value.
+///
+/// Stage 3 can put its Fabric write at this boundary.
+pub fn publish_current_accumulator(issuer: &Issuer<DemoScheme>) -> PublishedAccumulator {
+    PublishedAccumulator {
+        value: issuer.revocation_registry.value,
+    }
+}
+
+/// Obtain the current accumulator from the publication channel.
+///
+/// Stage 3 can put its Fabric read at this boundary.
+pub fn obtain_current_accumulator(publication: &PublishedAccumulator) -> Accumulator {
+    publication.value
+}
+
+/// Ask the issuer for a fresh membership witness for an unrevoked credential.
+///
+/// This is intentionally separate from applying the witness so Stage 3 can put
+/// the issuer-side, off-ledger refresh interaction at this boundary.
+pub fn request_fresh_revocation_handle(
+    issuer: &Issuer<DemoScheme>,
+    credential_id: &str,
+) -> CredxResult<MembershipWitness> {
+    issuer.update_revocation_handle(RevocationClaim::from(credential_id))
+}
+
+/// Apply an issuer-provided witness and its matching accumulator to a holder's bundle.
+pub fn apply_refreshed_revocation_handle(
+    credential: &mut CredentialBundle<DemoScheme>,
+    refreshed_handle: MembershipWitness,
+    current_accumulator: Accumulator,
+) {
+    credential.update_revocation_handle(refreshed_handle, current_accumulator);
+}
+
+/// Build the verifier's disclosure and non-revocation request with a fresh nonce.
 pub fn create_presentation_request(
     issuer_public: &IssuerPublic<DemoScheme>,
+    current_accumulator: Accumulator,
 ) -> PresentationRequest {
-    let statement = SignatureStatement {
+    let signature_statement = SignatureStatement {
         disclosed: BTreeSet::from(["name".to_string(), "role".to_string()]),
         id: CREDENTIAL_STATEMENT_ID.to_string(),
         issuer: issuer_public.clone(),
+    };
+    let revocation_statement = RevocationStatement {
+        id: REVOCATION_STATEMENT_ID.to_string(),
+        reference_id: signature_statement.id.clone(),
+        accumulator: current_accumulator,
+        verification_key: issuer_public.revocation_verifying_key,
+        claim: REVOCATION_CLAIM_INDEX,
     };
 
     let mut nonce = [0_u8; 32];
     thread_rng().fill_bytes(&mut nonce);
 
     PresentationRequest {
-        credential_statement_id: statement.id.clone(),
-        schema: PresentationSchema::new(&[statement.into()]),
+        credential_statement_id: signature_statement.id.clone(),
+        schema: PresentationSchema::new(&[signature_statement.into(), revocation_statement.into()]),
         nonce,
     }
 }
@@ -134,7 +195,6 @@ pub fn create_presentation(
 pub fn verify_presentation(
     presentation: &Presentation<DemoScheme>,
     request: &PresentationRequest,
-) -> CredxResult<bool> {
-    presentation.verify(&request.schema, &request.nonce)?;
-    Ok(true)
+) -> CredxResult<()> {
+    presentation.verify(&request.schema, &request.nonce)
 }

@@ -1,19 +1,24 @@
 # AnonCreds v2 VDR demo
 
-Stage 1 exercises the credx happy path in one Rust process:
+Stage 2 exercises the credx happy path and revocation lifecycle in one Rust
+process:
 
-1. create a credential schema;
-2. create issuer keys and public credential-definition material;
-3. issue a credential to a holder;
-4. create an in-memory presentation request;
-5. build a presentation; and
-6. verify it.
+1. issue credentials to Alice and Bob and verify both presentations;
+2. revoke Alice and publish the changed accumulator in memory;
+3. reject Alice's non-revocation presentation;
+4. also reject never-revoked Bob while his witness is stale;
+5. obtain an issuer-refreshed witness for Bob and verify him successfully; and
+6. confirm the issuer refuses to refresh revoked Alice.
 
-The demo intentionally performs no revocation check and has no Fabric, VDR, HTTP,
-or wire serialization. credx requires every directly signed credential to contain
-a revocation claim, so the credential has an opaque ID and `sign_credential`
-initializes its handle internally. Stage 1 creates no `RevocationStatement`, calls
-no revoke or witness-refresh API, and performs no accumulator verification.
+The accumulator publication/read and issuer-mediated witness refresh are explicit
+function boundaries in `src/lib.rs`. They pass native credx objects directly in
+memory. There is no Fabric, VDR, HTTP, wire serialization, batch revocation, or
+holder-side coefficient update in this stage.
+
+credx returns the same `InvalidPresentationData` challenge-mismatch error for a
+revoked witness and an unrevoked stale witness. The binary checks that precise
+error shape for both expected verification failures; the error itself does not
+differentiate the two states.
 
 The dependency is pinned to credx commit
 `691297a7f9ffcc1f51a5d30741086402d64544c9`.
@@ -24,5 +29,5 @@ Run it with:
 cargo run
 ```
 
-The reusable crypto boundaries live in `src/lib.rs`; `src/main.rs` only orchestrates
-the runnable demonstration.
+The reusable crypto and future transport boundaries live in `src/lib.rs`;
+`src/main.rs` only orchestrates and asserts the runnable demonstration.
