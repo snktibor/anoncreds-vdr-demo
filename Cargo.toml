@@ -1,0 +1,10 @@
+[package]
+name = "anoncreds-vdr-demo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+credx = { git = "https://github.com/hyperledger/anoncreds-v2-rs.git", rev = "691297a7f9ffcc1f51a5d30741086402d64544c9" }
+rand = "0.8"
+
