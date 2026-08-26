@@ -7,4 +7,5 @@ publish = false
 [dependencies]
 credx = { git = "https://github.com/hyperledger/anoncreds-v2-rs.git", rev = "691297a7f9ffcc1f51a5d30741086402d64544c9" }
 rand = "0.8"
-
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

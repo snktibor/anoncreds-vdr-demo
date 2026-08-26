@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use anoncreds_vdr_demo::stage3::{self, StageError, StageResult};
 use anoncreds_vdr_demo::{
     apply_refreshed_revocation_handle, create_credential_schema, create_issuer,
     create_presentation, create_presentation_request, issue_credential, obtain_current_accumulator,
@@ -6,6 +9,8 @@ use anoncreds_vdr_demo::{
 };
 use credx::error::Error;
 use credx::CredxResult;
+
+const USAGE: &str = "usage: anoncreds-vdr-demo [emit|verify] [directory]";
 
 const ALICE_CREDENTIAL_ID: &str = "stage2-alice-credential";
 const BOB_CREDENTIAL_ID: &str = "stage2-bob-credential";
@@ -23,7 +28,35 @@ fn assert_expected_revocation_failure(result: CredxResult<()>, holder: &str) {
     }
 }
 
-fn main() -> CredxResult<()> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
+}
+
+/// Dispatches the three modes: the in-process Stage 1-2 demo (default), emitting the
+/// Stage 3 artifacts for the Java VDR harness, and verifying what that harness read
+/// back off the ledger.
+fn run() -> StageResult<()> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let directory = arguments
+        .get(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(stage3::default_directory);
+
+    match arguments.first().map(String::as_str) {
+        None => Ok(run_in_process_demo()?),
+        Some("emit") => stage3::emit(&directory),
+        Some("verify") => stage3::verify(&directory),
+        Some(other) => Err(StageError::Assertion(format!(
+            "unknown mode '{other}'\n{USAGE}"
+        ))),
+    }
+}
+
+/// The Stage 1-2 revocation lifecycle, entirely in memory.
+fn run_in_process_demo() -> CredxResult<()> {
     println!("[1/6] issuing Alice and Bob credentials; verifying both before revocation");
     let credential_schema = create_credential_schema()?;
     let (issuer_public, mut issuer) = create_issuer(&credential_schema);

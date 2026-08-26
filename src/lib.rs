@@ -1,3 +1,5 @@
+pub mod stage3;
+
 use std::collections::BTreeSet;
 
 use credx::claim::{ClaimType, ClaimValidator, HashedClaim, NumberClaim, RevocationClaim};
