@@ -1,0 +1,8 @@
+anoncreds-vdr-demo
+Copyright 2025-2026 the anoncreds-vdr-demo authors
+
+This product includes software developed as part of the anoncreds-vdr-demo
+project, an AnonCreds v2 interoperability demonstration running against the
+fabric-vdr-core Verifiable Data Registry chaincode on Hyperledger Fabric.
+
+Licensed under the Apache License, Version 2.0 (see the LICENSE file).
