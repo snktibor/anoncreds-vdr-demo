@@ -15,19 +15,17 @@ that stands the ledger up, so the only thing it needs from outside is the chainc
 ```bash
 git clone https://github.com/snktibor/anoncreds-vdr-demo.git anoncreds-vdr-demo
 cd anoncreds-vdr-demo
-git clone -b feat/revocation-registry https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core
+git clone https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core
 ./run-anoncreds-demo.sh
 ```
 
 About ten minutes on a cold machine — it builds the chaincode image, generates the Fabric
 network and compiles credx from source. Roughly a minute on a network that is already up.
 
-Two things about the second clone. It must be named exactly `fabric-vdr-core` and sit in
-this directory: `fablo-config.json` deploys the chaincode from `./fabric-vdr-core`, which
-Fablo resolves against the directory holding `fablo-config.json`. And `-b
-feat/revocation-registry` is not optional yet — the revocation registry and the
-`AnonCredsDemoIT` harness are on that branch, not on the chaincode's default branch. The
-clone is gitignored here; it stays its own repository.
+The second clone must be named exactly `fabric-vdr-core` and sit in this directory:
+`fablo-config.json` deploys the chaincode from `./fabric-vdr-core`, which Fablo resolves
+against the directory holding `fablo-config.json`. The clone is gitignored here; it stays
+its own repository.
 
 ### Prerequisites
 

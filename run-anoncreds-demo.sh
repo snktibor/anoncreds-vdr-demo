@@ -21,7 +21,7 @@
 # bootstrap.sh), so the only thing it needs from outside is the chaincode. Clone that
 # repository into this directory, named exactly fabric-vdr-core, before the first run:
 #
-#   git clone -b feat/revocation-registry https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core
+#   git clone https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core
 #
 # The name and the location both matter: fablo-config.json deploys the chaincode from
 # ./fabric-vdr-core, resolved by Fablo against the directory holding fablo-config.json.
@@ -115,7 +115,7 @@ require_dir() {
 
 require_dir "$CHAINCODE_DIR" \
   "Clone the chaincode repository into this directory, named exactly fabric-vdr-core:
-    git clone -b feat/revocation-registry https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core"
+    git clone https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core"
 
 for tool in docker mvn java; do
   command -v "$tool" >/dev/null 2>&1 || { echo "$tool is not on PATH." >&2; exit 1; }

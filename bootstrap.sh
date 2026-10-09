@@ -23,7 +23,7 @@ build_chaincode() {
   echo "==> Building the chaincode image ($CHAINCODE_TAG)"
   if [ ! -d fabric-vdr-core ]; then
     echo "ERROR: fabric-vdr-core/ not found. Clone the chaincode repository in here:"
-    echo "  git clone -b feat/revocation-registry https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core"
+    echo "  git clone https://github.com/snktibor/fabric-vdr-core.git fabric-vdr-core"
     exit 1
   fi
   (cd fabric-vdr-core && mvn clean package -DskipTests)
