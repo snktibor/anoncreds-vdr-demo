@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **Version** | 0.1.0 |
-| **Date** | 2026-08-13 |
+| **Version** | 0.3.0 |
+| **Date** | 2026-09-22 |
 | **Verifiable Data Registry** | A Hyperledger Fabric channel running the `VdrContract` chaincode |
 | **AnonCreds object model** | AnonCreds v2 (see [§2](#2-status-of-this-document) — no normative v2 object data model exists; shapes are pinned to `credx`) |
 | **Reference implementation** | [`fabric-vdr-core`](https://github.com/snktibor/fabric-vdr-core) |
@@ -168,6 +168,8 @@ A universal AnonCreds resolver dispatches on the identifier. Because every ident
 
 Objects are stored in the world state of a Fabric channel, written and read exclusively through the `VdrContract` chaincode. Each object type occupies its own composite-key namespace: `DID`, `SCHEMA`, `CREDDEF`, `REVREGDEF`, `REVREGENTRY`, and `JWTNONCE` for consumed token identifiers. Within a namespace the object identifier is the key.
 
+The peers of the reference deployment run **LevelDB** as their state database, not CouchDB, and this method is written for that shape. Two consequences follow. First, there are no rich queries: every read this method performs is either a point lookup on a key or an ordered range scan over one composite-key namespace, which is why the `list*` transactions scan an entire namespace and why no transaction selects on record content. Second, the range reads it does perform are covered by Fabric's phantom-read protection — a range query enters the transaction's read set as a range plus a digest over the results it returned, and commit-time validation re-checks it, so a key inserted into that range between simulation and commit invalidates the transaction. A CouchDB rich query would carry no equivalent protection, because its result set is not re-evaluated at validation. The range-only access shape is therefore a property to preserve, not a limitation to route around.
+
 ### 5.2 SUBMIT and EVALUATE
 
 Every publishing operation is a SUBMIT transaction: endorsed by peers, ordered, then committed. Every resolution operation is an EVALUATE transaction: executed against one peer's world state, unauthenticated, writing nothing.
@@ -193,9 +195,11 @@ Every SUBMIT transaction emits exactly one event, delivered to subscribers with 
 | `CredDefCreated` | `createCredDef` | `{id, issuerId, schemaId}` |
 | `RevRegDefCreated` | `createRevRegDef` | `{id, issuerId, credDefId}` |
 | `RevRegEntryCreated` | `createRevRegEntry` | `{revRegDefId, accumValue, version}` |
-| `RevRegEntryUpdated` | `updateRevRegEntry` | `{revRegDefId, accumValue, version}` |
+| `RevRegEntryUpdated` | `updateRevRegEntry` **and** `updateRevRegEntryIfGuardsUnchanged` | `{revRegDefId, accumValue, version}` |
 
 `RevRegEntryUpdated` is the event holders MUST watch: after every accumulator change a holder's membership witness is stale ([§9](#9-non-revocation-and-the-witness-refresh-boundary)). Its payload carries the new accumulator value so no follow-up query is needed. It deliberately carries no timestamp; see [§5.6](#56-time).
+
+The two update transactions emit the **same** event with the **same** payload, deliberately. A subscriber refreshing witnesses cares that the accumulator moved, not which path moved it, and a second event name would leave every such subscriber blind to the registries that adopt the conditional path. That a conditional update's guards held is reported to its publisher in the transaction response, not broadcast ([§8.6](#86-revocation-registry-entry)).
 
 ### 5.6 Time
 
@@ -278,6 +282,10 @@ Length-prefixing makes the digest input injective: no combination of method and 
 
 The registry recomputes this digest from the invocation it actually received, reading the submitted arguments from the transaction stub. It additionally enforces that the `jwt` is the final submitted argument, so the digest is always computed over exactly the non-JWT arguments the client submitted. A token minted for one operation, or for the same operation with different arguments, is rejected on any other.
 
+**The conditional update.** `updateRevRegEntryIfGuardsUnchanged` ([§8.6](#86-revocation-registry-entry)) binds under the same formula, with `method` the literal string `updateRevRegEntryIfGuardsUnchanged` and `arg₁…arg₃` its three non-JWT arguments in submission order: `revRegDefId`, `accumValue`, `guardsJson`. Because the method name is the first element of the preimage, a token minted for `updateRevRegEntry` can never authorize the conditional path, and one minted for the conditional path can never authorize the unconditional one.
+
+It is the first transaction of this method whose digest covers a structured payload, and the rule for it is stated here rather than left to be inferred. **`guardsJson` contributes the exact byte sequence the publisher submits.** This specification defines **no** canonical form for it: whitespace, the member order inside a guard object, and the order of the array's elements are all inside the digest, and neither the publisher nor the registry normalizes any of them before hashing. A publisher therefore MUST serialize the guard list **once** and MUST sign that same string, byte for byte, as the one it submits. A publisher that serializes the list a second time on its way to the wire — from the same structure, but with different spacing or a different member order — has signed a digest over a string it is not submitting, and every such transaction is rejected as `UNAUTHORIZED`.
+
 ### 6.6 One-time use
 
 `jti` MUST be present and unique per issuer. On successful validation the registry derives a deterministic nonce key from the length-prefixed `(iss, jti)` pair — a SHA-256 hex digest, so no crafted issuer or `jti` value can collide with another pair — and writes a record into the `JWTNONCE` namespace together with the token's expiry.
@@ -294,8 +302,8 @@ Every object record carries an `ownerId`, set at creation to the verified signer
 
 The AnonCreds specification requires a method to verify that the publisher of an object controls the issuer identifier before publishing. This method satisfies that requirement with two checks applied on every object creation:
 
-1. The signer DID resolved from the verified token MUST equal the `issuerId` the transaction declares. A mismatch is `UNAUTHORIZED`.
-2. The object identifier MUST be a DID URL rooted at that same declared `issuerId` ([§7.7](#77-issuer-control-by-construction)).
+1. The object identifier MUST be a DID URL rooted at a syntactically well-formed issuer DID. No object-creating transaction declares an issuer separately: the identifier is the sole source, and the issuer is read back out of it at its first slash ([§7.7](#77-issuer-control-by-construction)).
+2. The signer DID resolved from the verified token MUST equal that issuer DID. A mismatch is `UNAUTHORIZED`.
 
 Together these mean a published identifier always names the DID that actually authorized it, and the proof is the ES256 signature over a transaction-bound, single-use token verified against a key that DID published.
 
@@ -362,7 +370,9 @@ The time dimension those methods encode in an entry identifier or query paramete
 
 Because the issuer DID is embedded in and roots the object identifier, the publisher-controls-issuer requirement is satisfied structurally rather than by a separate mechanism.
 
-The identifier is validated *against the issuer the transaction declares* — the issuer DID is an input to the check, never something parsed back out of the identifier — and that declared issuer must in turn equal the verified token signer ([§6.8](#68-verifying-publisher-control)). No caller can mint an identifier rooted at a DID it does not control, and no resolver needs a second lookup to learn who published an object: the identifier names its own issuer.
+Object-creating transactions take no separate issuer argument. The identifier is *the sole source of the issuer*: a DID never contains `/` (DID Core), so the identifier splits unambiguously at its first slash, the segment before it must itself be a well-formed DID, and that issuer must in turn equal the verified token signer ([§6.8](#68-verifying-publisher-control)). No caller can mint an identifier rooted at a DID it does not control, and no resolver needs a second lookup to learn who published an object: the identifier names its own issuer.
+
+The `issuerId` field on a resolved record is therefore derived, not declared. It is written at creation from the identifier the transaction carried, and a resolver that re-derives it from the identifier MUST obtain the same value.
 
 This property is free for DID-bound methods and is the principal reason this method is DID-bound. A method whose identifiers carry no issuer binding must answer "how does a resolver know the publisher controlled `issuerId`?" with an explicit mechanism; here the answer is the grammar.
 
@@ -537,18 +547,18 @@ A schema declares the attribute set of a credential. Published schemas are **imm
 #### Creation and publishing
 
 1. The publisher MUST mint an identifier of the form `<issuer-did>/anoncreds/v2/SCHEMA/<UUIDv7>`, rooted at the DID it controls.
-2. The publisher MUST construct and sign a DID-JWT meeting every requirement of [§6.3](#63-did-jwt-profile), with `txd` computed over the method name `createSchema` and the five non-JWT arguments in submission order.
-3. The publisher MUST submit `createSchema(id, issuerId, name, version, attrNamesJson, jwt)` with the token as the final argument. The registry MUST reject the transaction if the final submitted argument is not the token.
+2. The publisher MUST construct and sign a DID-JWT meeting every requirement of [§6.3](#63-did-jwt-profile), with `txd` computed over the method name `createSchema` and the four non-JWT arguments in submission order.
+3. The publisher MUST submit `createSchema(id, name, version, attrNamesJson, jwt)` with the token as the final argument. The registry MUST reject the transaction if the final submitted argument is not the token.
 4. The registry MUST verify the token and resolve the signer DID: `ES256`, `kid` selecting an `ACTIVE` issuer's `JsonWebKey2020` EC P-256 verification method, valid signature, and `iat` / `nbf` / `exp` satisfied against the transaction timestamp within the 30-second tolerance.
 5. The registry MUST verify deployment and transaction binding: `aud` contains `vdr-network:vdrchaincode`, and `txd` equals the digest recomputed from the invoked method and its submitted arguments.
 6. The registry MUST consume the token: `jti` MUST be present, MUST NOT already be recorded for this issuer, and MUST be written into the `JWTNONCE` namespace as part of this transaction's write set.
-7. The registry MUST validate that `issuerId` is a syntactically well-formed DID.
-8. The registry MUST validate that `id` is rooted at that `issuerId`, carries the `/anoncreds/v2/` path and the `SCHEMA` type token, and ends in a valid UUIDv7.
+7. The registry MUST validate that `id` carries the `/anoncreds/v2/` path and the `SCHEMA` type token and ends in a valid UUIDv7.
+8. The registry MUST read the issuer DID out of `id` — the segment preceding its first `/` — and MUST validate that it is a syntactically well-formed DID. The transaction declares no issuer of its own ([§7.7](#77-issuer-control-by-construction)).
 9. The registry MUST validate the payload: `name` and `version` non-blank after trimming, and `attrNames` a non-empty JSON array of unique, non-blank strings whose input order is preserved.
-10. The registry MUST reject the transaction as `UNAUTHORIZED` unless `issuerId` equals the signer DID.
+10. The registry MUST reject the transaction as `UNAUTHORIZED` unless the issuer DID read out of `id` equals the signer DID.
 11. The registry MUST reject the transaction as `ALREADY_EXISTS` if a schema with this identifier is already present.
 12. The registry MUST reject the transaction unless the issuer DID exists and its status is `ACTIVE`.
-13. The registry MUST persist the record with `ownerId` set to the signer DID and `createdAt` set to the transaction timestamp, overwriting any client-supplied value.
+13. The registry MUST persist the record with `issuerId` set to the DID read out of `id`, `ownerId` set to the signer DID, and `createdAt` set to the transaction timestamp, overwriting any client-supplied value.
 14. The registry MUST emit `SchemaCreated` with `{id, issuerId}`.
 15. The transaction MUST be endorsed, ordered, and pass MVCC validation before any of the above takes effect. A transaction that fails at any point writes nothing and emits nothing.
 
@@ -603,20 +613,20 @@ A credential definition binds an issuer, a schema and a signature scheme, and pu
 #### Creation and publishing
 
 1. The publisher MUST mint an identifier of the form `<issuer-did>/anoncreds/v2/PUBLIC_CRED_DEF/<UUIDv7>`, rooted at the DID it controls.
-2. The publisher MUST construct and sign a DID-JWT per [§6.3](#63-did-jwt-profile), with `txd` computed over `createCredDef` and the six non-JWT arguments in submission order.
-3. The publisher MUST submit `createCredDef(id, issuerId, schemaId, type, tag, publicMetadataJson, jwt)` with the token as the final argument.
+2. The publisher MUST construct and sign a DID-JWT per [§6.3](#63-did-jwt-profile), with `txd` computed over `createCredDef` and the five non-JWT arguments in submission order.
+3. The publisher MUST submit `createCredDef(id, schemaId, type, tag, publicMetadataJson, jwt)` with the token as the final argument.
 4. The registry MUST verify the token and resolve the signer DID, as in [§8.3](#83-schema) step 4.
 5. The registry MUST verify deployment and transaction binding (`aud`, `txd`).
 6. The registry MUST consume the token identifier (`jti`).
-7. The registry MUST validate that `issuerId` is a well-formed DID.
-8. The registry MUST validate that `id` is rooted at `issuerId` with the `PUBLIC_CRED_DEF` type token and a valid UUIDv7 object segment.
+7. The registry MUST validate that `id` carries the `PUBLIC_CRED_DEF` type token and a valid UUIDv7 object segment.
+8. The registry MUST read the issuer DID out of `id` and MUST validate that it is a well-formed DID ([§7.7](#77-issuer-control-by-construction)).
 9. The registry MUST validate that `schemaId` and `tag` are non-blank, and that `publicMetadataJson` parses as a JSON **object**. Its contents are not validated further; see [§8.1.6](#816-recommended-publicmetadata-shapes).
 10. The registry MUST validate `type` against the credential definition allowlist: `ANONCREDS_V2/BBS/1.0` or `ANONCREDS_V2/PS/1.0`. Any other value, including the v1 `CL` family, is `INVALID_ARGUMENT`.
-11. The registry MUST reject the transaction as `UNAUTHORIZED` unless `issuerId` equals the signer DID.
+11. The registry MUST reject the transaction as `UNAUTHORIZED` unless the issuer DID read out of `id` equals the signer DID.
 12. The registry MUST reject the transaction as `ALREADY_EXISTS` if the identifier is already present.
 13. The registry MUST reject the transaction as `NOT_FOUND` unless the referenced schema exists. **The schema's issuer is deliberately not constrained** — a credential definition MAY reference a schema published by a different issuer, which is what makes schemas reusable.
 14. The registry MUST reject the transaction unless the issuer DID exists and is `ACTIVE`.
-15. The registry MUST persist the record with `ownerId` set to the signer DID and `createdAt` set to the transaction timestamp.
+15. The registry MUST persist the record with `issuerId` set to the DID read out of `id`, `ownerId` set to the signer DID, and `createdAt` set to the transaction timestamp.
 16. The registry MUST emit `CredDefCreated` with `{id, issuerId, schemaId}`.
 17. The transaction MUST be endorsed, ordered, and pass MVCC validation.
 
@@ -692,22 +702,22 @@ A revocation registry definition publishes the parameters and public key materia
 #### Creation and publishing
 
 1. The publisher MUST mint an identifier of the form `<issuer-did>/anoncreds/v2/REV_REG_DEF/<UUIDv7>`, rooted at the DID it controls.
-2. The publisher MUST construct and sign a DID-JWT per [§6.3](#63-did-jwt-profile), with `txd` computed over `createRevRegDef` and the six non-JWT arguments in submission order. `maxCredNum` contributes the exact decimal wire string submitted.
-3. The publisher MUST submit `createRevRegDef(id, issuerId, credDefId, type, publicKeysJson, maxCredNum, jwt)` with the token as the final argument.
+2. The publisher MUST construct and sign a DID-JWT per [§6.3](#63-did-jwt-profile), with `txd` computed over `createRevRegDef` and the five non-JWT arguments in submission order. `maxCredNum` contributes the exact decimal wire string submitted.
+3. The publisher MUST submit `createRevRegDef(id, credDefId, type, publicKeysJson, maxCredNum, jwt)` with the token as the final argument.
 4. The registry MUST verify the token and resolve the signer DID.
 5. The registry MUST verify deployment and transaction binding (`aud`, `txd`).
 6. The registry MUST consume the token identifier (`jti`).
-7. The registry MUST validate that `issuerId` is a well-formed DID.
-8. The registry MUST validate that `id` is rooted at `issuerId` with the `REV_REG_DEF` type token and a valid UUIDv7 object segment.
+7. The registry MUST validate that `id` carries the `REV_REG_DEF` type token and a valid UUIDv7 object segment.
+8. The registry MUST read the issuer DID out of `id` and MUST validate that it is a well-formed DID ([§7.7](#77-issuer-control-by-construction)).
 9. The registry MUST validate that `credDefId` is non-blank.
 10. The registry MUST validate `type` against the revocation allowlist, which admits exactly one value: `ANONCREDS_V2/VB20/1.0`. `CL_ACCUM` and every other foreign token are `INVALID_ARGUMENT` ([§8.2](#82-deviations-from-anoncreds-v1-object-shapes)).
 11. The registry MUST validate `publicKeys` as a JSON object containing **exactly one** field, `revocationVerifyingKey`, whose value is a string matching `^[0-9a-f]{192}$` with the compression flag set and the infinity flag clear. Missing, extra, or non-string fields are `INVALID_ARGUMENT`.
 12. The registry MUST reject `maxCredNum` unless it is greater than zero. No other bound is checked, and the value carries no cryptographic meaning ([§8.2](#82-deviations-from-anoncreds-v1-object-shapes)).
-13. The registry MUST reject the transaction as `UNAUTHORIZED` unless `issuerId` equals the signer DID.
+13. The registry MUST reject the transaction as `UNAUTHORIZED` unless the issuer DID read out of `id` equals the signer DID.
 14. The registry MUST reject the transaction as `ALREADY_EXISTS` if the identifier is already present.
-15. The registry MUST reject the transaction as `NOT_FOUND` unless the referenced credential definition exists, and MUST reject it as `INVALID_ARGUMENT` unless that credential definition's `issuerId` equals the declared `issuerId`. Unlike the schema reference in [§8.4](#84-credential-definition), a revocation registry MUST be published by the same issuer as the credential definition it revokes against.
+15. The registry MUST reject the transaction as `NOT_FOUND` unless the referenced credential definition exists, and MUST reject it as `INVALID_ARGUMENT` unless that credential definition's `issuerId` equals the issuer DID read out of `id`. Unlike the schema reference in [§8.4](#84-credential-definition), a revocation registry MUST be published by the same issuer as the credential definition it revokes against.
 16. The registry MUST reject the transaction unless the issuer DID exists and is `ACTIVE`.
-17. The registry MUST persist the record with `ownerId` set to the signer DID and `createdAt` set to the transaction timestamp. This `ownerId` is what every subsequent entry operation is authorized against ([§6.7](#67-ownership)).
+17. The registry MUST persist the record with `issuerId` set to the DID read out of `id`, `ownerId` set to the signer DID, and `createdAt` set to the transaction timestamp. This `ownerId` is what every subsequent entry operation is authorized against ([§6.7](#67-ownership)).
 18. The registry MUST emit `RevRegDefCreated` with `{id, issuerId, credDefId}`.
 19. The transaction MUST be endorsed, ordered, and pass MVCC validation.
 20. The published definition MUST be treated as immutable thereafter. No transaction exists to update or deactivate it.
@@ -789,11 +799,135 @@ Revocation is expressed entirely as replacement of this value. This subsection i
 5. The registry MUST reject a blank `revRegDefId`, and MUST validate `accumValue` exactly as on creation.
 6. The registry MUST reject the transaction as `NOT_FOUND` unless an entry already exists for the definition.
 7. The registry MUST reject the transaction as `NOT_FOUND` unless the parent definition exists, and as `UNAUTHORIZED` unless the signer DID equals that definition's recorded `ownerId`.
-8. The registry MUST replace the accumulator value in place, increment `version` by one, and set `updatedAt` to the transaction timestamp.
+8. The registry MUST replace the accumulator value in place, increment `version` by one, and set `updatedAt` to the transaction timestamp. The replacement is unconditional: no step of this sequence reads the value being overwritten, compares it with the submitted value, or requires the accumulator to differ from, or to advance beyond, the value the entry already held.
 9. The registry MUST emit `RevRegEntryUpdated` with `{revRegDefId, accumValue, version}`.
-10. Fabric MVCC validation MUST serialise concurrent submissions against the same entry: of two concurrent updates, exactly one commits. `version` is therefore an auditable ordering counter, not a concurrency guard supplied by the client.
+10. Fabric MVCC validation MUST serialise concurrent submissions against the same entry: of two concurrent updates, exactly one commits and the other writes nothing. The field that carries this guarantee is the entry's **`version`**, not its `accumValue`. `version` advances by exactly one on every committed update and never repeats, so it is the only field of this record against which a reader, or a future transaction, can decide whether the entry it examined is still the entry that is current. `version` remains a counter **the registry** assigns: the registry MUST write it, and no transaction of this method MAY accept a value for it from a client. A client MAY, on the conditional path below, submit an expected `version` as a **precondition**; where it does, the registry MUST compare that value against the version it read inside the transaction, and MUST NOT store it — the expected value never becomes, and never influences, what the record holds. Such an expected value is a **complement to the in-transaction read, never a substitute for it**: the guarantee continues to come from reading the entry inside the transaction that writes, which places that entry's key in the transaction's read set and hands the re-check to Fabric. An expected value compared against anything other than a value read inside the transaction would carry none of it.
 
 Every update invalidates every outstanding membership witness. Holders MUST refresh; see [§9](#9-non-revocation-and-the-witness-refresh-boundary).
+
+**This sequence carries no cross-registry guarantee, and that is a property of the path, not an omission from the list.** It conditions the write on nothing beyond the target entry's own existence and the signer's ownership of its parent definition. A publisher that consults a *different* registry before submitting — resolving it, finding it where it expected, and only then revoking — gains nothing from having done so: that read was an EVALUATE outside any transaction ([§5.2](#52-submit-and-evaluate)), it placed no key in this transaction's read set, and commit-time validation has nothing to re-check. Two publishers that each check the other's registry this way and then revoke through `updateRevRegEntry` both commit. This is measured behaviour of the reference implementation, not a theoretical possibility ([§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not)). A publisher whose correctness depends on another registry not having moved MUST use the conditional update specified below instead. That path is opt-in and this one is **not deprecated**: for an update that depends on no registry but its own it remains the correct choice, and the cheaper one — one key read instead of one per guard.
+
+**Why `version` and not `accumValue`.** The accumulator value is the obvious candidate for any condition a reader or a future transaction might want to express over this record — *has the state I examined changed?* — and it is the wrong one, for two independent reasons that point the same way. First, a condition over `accumValue` is no finer-grained than one over `version`. A VB20 membership witness is bound to one specific accumulator value, so every committed update invalidates every outstanding witness of that registry, not only the witnesses of the credentials actually revoked ([§9.2](#92-why-a-resolved-accumulator-is-not-enough)); a condition phrased as *is this proof still valid against the published accumulator?* therefore fails on exactly the same updates as *has this entry been written since?*. Second, `accumValue` is not monotone and `version` is. Nothing in the sequence above forbids republishing a value the entry already held, so one `accumValue` can be current at two separate points of an entry's history, while one `version` cannot. The value-based condition is consequently **strictly weaker**: it accepts everything the version-based condition accepts, plus those histories in which the accumulator returns to an earlier value — and in exactly those histories it readmits state that the version-based condition would have rejected. `version` is what a conditional operation over this record has to be anchored to.
+
+**Accumulator monotonicity is not enforced, and the consequence is stated here rather than left implicit.** The list above is the complete set of checks an unconditional update passes: token validity, deployment and transaction binding, nonce consumption, `accumValue` format, existence of the entry and of its parent definition, and ownership of that parent. The registry never reads the accumulator it is about to overwrite, holds no representation of the revoked set, and performs no accumulator cryptography ([§8.1.4](#814-validation-scope)) — so it has no means, even in principle, of telling a forward step from a backward one. A registry owner may therefore publish any well-formed value in a single, entirely conformant `updateRevRegEntry`, including a value that entry held before.
+
+The conditional update specified below does not change this. Its preconditions are stated over `version`, never over `accumValue`, and every one of them is satisfiable by the owner of the entry it names: an owner intent on rewinding reads the current version, submits it as its own expected version, and writes whatever well-formed value it likes. What a guard on the target closes is a *silent* overwrite between two writers working from the same observed state; what it does not close, and is not built to close, is a deliberate rewind by the party authorized to write.
+
+The consequence, plainly: **revocation is not irreversible at the registry.** An issuer that revokes a credential and later republishes the preceding accumulator value restores every membership witness that was valid against it, and a non-revocation proof computed against that earlier value verifies again. `version` still advances across such a rewind, so the ledger records it and [`getRevRegEntryHistory`](#86-revocation-registry-entry) exposes both revisions — the rewind is **auditable after the fact, but it is not prevented**, and a resolver that reads only the current entry cannot detect it. A resolver or verifier whose decision depends on the accumulator having only moved forward MUST establish that from the revision history and MUST NOT assume it from a single read.
+
+This is a property of the reference implementation as it stands, not a deliberate design choice. Closing it is not a matter of adding *a* precondition — one now exists, and it is the wrong shape for this problem: a `version` precondition asks whether the entry has been written since a stated point, which a rewind answers truthfully. Enforcing monotonicity would require the registry to decide whether one accumulator value succeeds another, which is an ordering over group elements that no field of this record expresses and that the chaincode cannot compute ([§8.1.4](#814-validation-scope)). It is recorded as a deferred item in [§11.8](#118-other-deferred-items) so that it stays visible.
+
+#### Conditional update — updating only if named registries are unchanged
+
+`updateRevRegEntryIfGuardsUnchanged` replaces the accumulator of one entry **only if** a list of named revocation registry entries all still stand at the versions the publisher observed. It is a second, opt-in write path alongside the unconditional one; it does not replace it, and it changes nothing about it.
+
+Each element of that list is a **guard**: one revocation registry definition identifier, and the entry `version` that entry MUST still be at. The registry reads every guarded entry **inside the transaction**, which is the whole mechanism — it is that read, and not the comparison it feeds, that admits the guarded key to the transaction's read set and hands the re-check to Fabric's commit-time validation ([§5.3](#53-endorsement-ordering-and-mvcc)). The comparison closes the interval between the publisher's observation and endorsement; the read set closes the interval between endorsement and commit. Neither half is sufficient alone.
+
+The registry performs no accumulator cryptography on this path either ([§8.1.4](#814-validation-scope)). A guard asserts that a registry **has not been written** since a stated version, and nothing whatever about the credentials that registry covers: any committed write to a guarded entry rejects, whether or not it touched the credential the publisher cared about ([§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not)).
+
+The guard list travels as one JSON string argument, `guardsJson`:
+
+```json
+[
+  { "revRegDefId": "did:vdr:018f6c02-3a5e-7cbb-9d3e-5f2a4b6c8d0e/anoncreds/v2/REV_REG_DEF/018f6c0a-9e33-7f41-b6d2-71c40a8e2f95", "expectedVersion": 3 },
+  { "revRegDefId": "did:vdr:018f6c11-77b2-7a04-8e19-2d63c5904af1/anoncreds/v2/REV_REG_DEF/018f6c14-0b8d-7cc6-9f52-6a7e13d840b2", "expectedVersion": 0 }
+]
+```
+
+1. The publisher MUST resolve every entry it intends to guard and MUST record the `version` each one returned. That recorded version is the expected version it submits for that guard, and the off-chain check its decision rests on MUST have been performed against **those** states and no later ones.
+2. The issuer MUST recompute the target registry's accumulator off chain and encode it per [§8.1.2](#812-accumvalue--the-vb20-accumulator), exactly as for an unconditional update.
+3. The publisher MUST serialize the guard list **once** and MUST use that one string both to compute the token and to submit the transaction. `guardsJson` has no canonical form and is digested as submitted ([§6.5](#65-transaction-binding)).
+4. The publisher MUST construct and sign a fresh DID-JWT per [§6.3](#63-did-jwt-profile), with `txd` computed over `updateRevRegEntryIfGuardsUnchanged` and the three non-JWT arguments in submission order.
+5. The publisher MUST submit `updateRevRegEntryIfGuardsUnchanged(revRegDefId, accumValue, guardsJson, jwt)` with the token as the final argument.
+6. The registry MUST verify the token, the deployment and transaction binding, and MUST consume the token identifier, exactly as on every other write path. No step below runs until this one has succeeded; no guard is parsed, and no ledger key is read, ahead of it.
+7. The registry MUST reject a blank `revRegDefId`, and MUST validate `accumValue` exactly as on creation.
+8. The registry MUST reject the transaction as `INVALID_ARGUMENT` unless `guardsJson` satisfies all of the following. Every one of these is decided from the text alone, before the transaction reads any object record:
+   1. the argument is **exactly one** JSON value, and that value is an **array**. A JSON `null`, a value of any other type, and any non-whitespace content following the array — a second JSON value, or trailing junk — are each rejected;
+   2. the array is **non-empty** and holds at most **16** elements. An empty list is refused rather than read as "no condition": it would perform an unconditional write under a name that promises a conditional one, and hand back a guarantee the publisher never obtained. The upper bound is what holds the endorsement cost and read-set size of one transaction, each guard being one world-state read and one read-set key;
+   3. every element is a JSON **object** carrying **exactly** the two fields `revRegDefId` and `expectedVersion`. A missing field leaves the guard underspecified; an extra field means the publisher expected a check this registry does not make;
+   4. `revRegDefId` is a string that is non-blank after trimming;
+   5. `expectedVersion` is an **integral** JSON number in the inclusive range 0 to 9223372036854775807. A quoted number, a number written with a fractional part, and a negative value are each rejected;
+   6. **no registry is guarded twice**: the trimmed identifiers are pairwise distinct. Repeated with one expected version the guard is redundant, with two it can never be satisfied, and the text alone settles which — so it is a malformed request, not a failed precondition;
+   7. **no JSON object anywhere in the payload carries the same member name twice.** The last occurrence MUST NOT silently win.
+9. The registry MUST reject the transaction as `NOT_FOUND` unless an entry already exists for `revRegDefId`, and as `NOT_FOUND` unless that entry's parent definition exists.
+10. The registry MUST reject the transaction as `UNAUTHORIZED` unless the signer DID equals the parent definition's recorded `ownerId` ([§6.7](#67-ownership)). This check MUST precede every guard read.
+11. The registry MUST then process the guards **in submission order**, and MUST check every element of the list.
+12. For each guard, the registry MUST obtain the guarded entry's version by **reading that entry within this transaction**. A guard naming the entry being updated MAY be answered from the record this transaction has already read, whose key is in the read set for that reason; every other guard MUST be resolved by its own read. The registry MUST NOT accept a guarded registry's state as an argument, and MUST NOT read the guarded registry's *definition* record — an identifier and an expected version are all a guard contributes, and every additional key in the read set is one more key that can fail validation.
+13. The registry MUST reject the transaction as `NOT_FOUND` if no entry exists for a guarded identifier. **An absent entry MUST NOT be treated as a match for any expected version, `0` included** — see below.
+14. The registry MUST reject the transaction as `FAILED_PRECONDITION` unless the version it read for a guard equals the expected version submitted for that guard. The **first** mismatch in submission order decides the outcome, so the result is identical on every endorsing peer.
+15. The registry MUST NOT write to a guarded registry, and MUST NOT emit an event for one. The sole write of this transaction is the one described in the next step, to the target entry.
+16. Only once every guard has held, the registry MUST replace the accumulator value of the target entry in place, increment its `version` by exactly one, and set `updatedAt` to the transaction timestamp. If any guard fails, the registry MUST write nothing and emit nothing.
+17. The registry MUST emit `RevRegEntryUpdated` with `{revRegDefId, accumValue, version}` — the same event, with the same payload, as the unconditional path emits ([§5.5](#55-chaincode-events)). A separate event name would make every witness-refresh subscriber blind to accumulator changes published this way. That the guards held is returned to the publisher, not broadcast.
+18. The registry MUST return a JSON object with exactly two members, `entry` and `guards`, as defined below.
+19. The transaction MUST be endorsed, ordered, and pass MVCC validation. A committed write to any guarded entry between endorsement and commit invalidates this transaction, which then writes nothing.
+
+**Why the ownership check precedes every guard read.** The order in step 10 is normative, and the reason is error semantics, not concealment. An authorization failure dominates: a caller that does not own the target entry's parent definition receives `UNAUTHORIZED` whatever it named as a guard and whatever state those registries are in, so the code that comes back is a function of the caller's authority alone. `NOT_FOUND` and `FAILED_PRECONDITION` arising from a guard are answers given **only to a caller entitled to ask**. This is deliberately *not* an information-hiding argument: `getRevRegEntry` is a public EVALUATE ([§5.2](#52-submit-and-evaluate)), so the existence and current version of any registry on the channel is already readable by every channel member, and no ordering of these checks could change that.
+
+**Guarding the entry being updated.** A publisher MAY name the target entry among its own guards. This is not a degenerate request but a **compare-and-swap** on that entry: the write proceeds only if the entry is still at the version the publisher computed its new accumulator from. The subject of such a guard is the version the entry holds **before** this transaction's mutation — the registry answers it from the record it has already read, and takes no second read.
+
+Two consequences follow, and both are visible in the response. The `checkedVersion` reported for a guard on the target is exactly one less than the `entry.version` reported beside it. And a *subsequent* conditional update that guards the same entry MUST submit that `entry.version` — the value after the mutation — as its expected version; submitting the `checkedVersion` instead names a state the entry has already left, and the registry MUST reject it with `FAILED_PRECONDITION`.
+
+What a guard on the target closes is the last-write-wins window between two writers of the same registry that started from the same observed version: without it, the second commits and silently overwrites the first, and the first publisher's revocation is lost with no error anywhere. With it, the second is refused — `FAILED_PRECONDITION` if the first has already committed, or invalidated by MVCC if the two were endorsed against the same state and released together. What it does **not** close is a deliberate rewind by the registry's own owner: accumulator monotonicity remains unenforced, for the reasons set out above, and this path does not alter that.
+
+**The two version fields of the response.** A successful conditional update MUST return:
+
+```json
+{
+  "entry": {
+    "accumValue": "8e7b77078e4b08bfa0780446fcc67822e83cb243474c03d71ad45cd0601ce7c5da9b14d74fcdc88ad83b1794752e9632",
+    "createdAt": "2026-08-13T09:19:07.221Z",
+    "revRegDefId": "did:vdr:018f6c02-3a5e-7cbb-9d3e-5f2a4b6c8d0e/anoncreds/v2/REV_REG_DEF/018f6c0a-9e33-7f41-b6d2-71c40a8e2f95",
+    "updatedAt": "2026-08-13T11:02:55.610Z",
+    "version": 4
+  },
+  "guards": [
+    { "revRegDefId": "did:vdr:018f6c02-3a5e-7cbb-9d3e-5f2a4b6c8d0e/anoncreds/v2/REV_REG_DEF/018f6c0a-9e33-7f41-b6d2-71c40a8e2f95", "checkedVersion": 3 },
+    { "revRegDefId": "did:vdr:018f6c11-77b2-7a04-8e19-2d63c5904af1/anoncreds/v2/REV_REG_DEF/018f6c14-0b8d-7cc6-9f52-6a7e13d840b2", "checkedVersion": 0 }
+  ]
+}
+```
+
+| Field | Definition |
+|---|---|
+| `entry` | the target entry **after** the mutation, in the shape `getRevRegEntry` returns |
+| `entry.version` | the target's version after the mutation. This is the value a *following* conditional update MUST submit as the expected version of a guard on that same entry |
+| `guards` | one element per submitted guard, in submission order, carrying the trimmed identifier |
+| `guards[i].checkedVersion` | the version **the registry read out of world state** for that guard inside this transaction — the version against which the guard was decided |
+
+The two carry deliberately different names. No member of a `guards` element is named `version`, so no field of this response can be mistaken for the entry's own.
+
+`checkedVersion` is normative in its provenance, not only in its value: the registry MUST report the version it read inside the transaction, and MUST NOT echo back the expected version the publisher submitted. For a guard that passed, the two are equal by definition — that equality is what "passed" means, and a reader will find no difference between them on the wire. The requirement exists so that the response remains a statement about world state under any later change to how a guard is decided: a registry that echoed the submitted value would be reporting the caller's claim about the ledger as though it were the ledger's answer. In the reference implementation the error is foreclosed at the type level, the value its contract layer serializes carrying no expected version to echo; at the level of this specification the MUST NOT is what holds a later refactor back.
+
+**Chaining conditional updates.** A publisher performing a sequence of conditional updates MAY take every expected version of the next call from the response to the previous one, without re-resolving anything: `entry.version` for a guard on the target, `guards[i].checkedVersion` for a guard on any other registry. The two are not interchangeable, and the difference is not cosmetic — substituting one for the other names a different state and is refused.
+
+Carrying `guards[i].checkedVersion` forward is sound **because it is fail-safe**, and not because the earlier call promised anything about the interval after it. A conditional update guarantees that its guards were unchanged from the observed state up to **its own commit**, and nothing about what happens to them afterwards. If a guarded registry has been written in the meantime, the next call's guard simply fails and nothing is written. If it has not, the version match means a **state** match, because every write advances the version — so the off-chain check the publisher performed against that earlier state is still a check against the state the registry is in.
+
+**Every committed write advances `version`.** That last argument, and the chaining rule with it, rests on a property of the record that is stated here as a requirement rather than left as an observation: **the registry MUST increment an entry's `version` by exactly one on every committed write of that entry after its creation, and MUST NOT write an entry back with its `version` unchanged.** Creation establishes `version` 0 and is the one write that does not increment, having nothing to increment from. The requirement binds every write path to this record type, present or future — administrative, bulk, or corrective included: a registry that admitted one such path would break the implication from version equality to state equality, and every conditional update anywhere on the channel would silently weaken, with nothing in any response to show it.
+
+**A guard naming an entry that does not exist.** Such a guard is `NOT_FOUND`, always, and matches **no** expected version — `0` least of all. Two situations produce it, and the registry treats them identically because it cannot distinguish them and does not try: the identifier names nothing at all, or it names a definition whose genesis entry was never created. Neither is a state a publisher could have observed and pinned. The trap this rule closes is the one where an absent record is read as a version-zero record — by defaulting a missing value to `0`, by materialising an empty record, or by letting an absent guard fall silently out of the loop. Any of the three would let a guard naming a typo pass unconditionally. A publisher that wishes to guard a registry must guard one whose entry exists.
+
+**One payload, one reading.** The first and the last of the rules in step 8 are stated because `guardsJson` is a signed byte string that also becomes the ledger's audit trail of what was asked. If one such string can be read two ways, then the signer, the registry, and a later auditor can each draw a different meaning from the same authorized bytes. Most JSON parsers default to exactly the two readings those rules forbid: on a repeated member name they silently keep the last value, and after the first complete value they stop reading. A registry implementing this method MUST configure its parser out of both defaults for this argument. (This requirement is stated here for `guardsJson`. The other JSON-carrying arguments of this method are in the same position and are **not** covered by it; that gap is recorded in [§11.8](#118-other-deferred-items).)
+
+**Error codes.** Beyond the codes the unconditional path can return, this transaction introduces one:
+
+| Condition | Code |
+|---|---|
+| any JWT check fails, including the `txd` mismatch that a re-serialized `guardsJson` produces | `UNAUTHORIZED` |
+| blank `revRegDefId`; malformed `accumValue`; `guardsJson` violating any rule of step 8 | `INVALID_ARGUMENT` |
+| the target entry or its parent definition is missing | `NOT_FOUND` |
+| the signer does not own the target's parent definition | `UNAUTHORIZED` |
+| a guarded registry has no entry — whether the identifier is unknown or its genesis entry was never created, and **including** when the expected version is `0` | `NOT_FOUND` |
+| a guarded registry stands at a version other than the one expected for it | **`FAILED_PRECONDITION`** |
+
+`FAILED_PRECONDITION` is new with this transaction and is the one code of this method that says the request was **well formed and authorized** and the world state simply did not meet the stated condition. Only the code is normative. The accompanying message is RECOMMENDED to name the guarded registry's identifier, the version found, and the version expected, and it MUST NOT assert that anything was revoked — the registry knows only that the version moved, never why. A message of the form
+
+```
+guard registry '<id>' is at version <found>, expected <expected>: it has changed since the state this operation was tested against
+```
+
+satisfies that. How much of either reaches a client is a property of the client stack, not of this method. The chaincode returns the code in the chaincode response **payload** and the message in the error itself; whether a given client library surfaces both is that library's business. On the Java Fabric Gateway path of the reference deployment, an endorsement failure delivers the message — prefixed per endorsing peer — but not the payload, so a client there has only the message text to classify on, which is why a stable message form is worth recommending at all. This paragraph is an implementation note, not a requirement: what this specification pins is the code.
+
+The flow this transaction sits in, from the check the guard is conditioned on to commit validation, is drawn in [§9.6](#96-the-conditional-update-flow-end-to-end). What it does and does not guarantee is set out in [§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not).
 
 #### Resolution
 
@@ -900,6 +1034,124 @@ RECOMMENDED shape:
 
 Where a refresh service is absent or unreachable, holders of credentials in that registry cannot refresh and therefore cannot produce non-revocation proofs. This is an availability property of the issuer, not of the registry; see [§10.1](#101-liveness-and-availability).
 
+### 9.5 The presentation flow, end to end
+
+The boundary drawn above is easier to misread in prose than in a picture, so the whole lifecycle is set out here in one sequence: issuance, revocation, refresh, and a presentation. This is the flow the reference deployment runs today, not a planned one. `OFF` marks a step that happens off ledger; `ON` marks a step the ledger takes part in.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ISS as Issuer - credx
+    participant HOL as Holder - credx
+    participant VER as Verifier - credx
+    participant PUB as Publishing client
+    participant CC as VDR chaincode
+    participant WS as World state - LevelDB
+
+    Note over ISS,HOL: ISSUANCE - entirely off ledger
+    ISS->>ISS: OFF - sign the credential and build a membership witness against accumulator A0
+    ISS-->>HOL: OFF - credential and witness, the witness a 48 byte G1 point
+
+    Note over ISS,WS: REVOCATION - the ledger sees only the result
+    ISS->>ISS: OFF - revoke, the accumulator moves from A0 to A1 under the issuer secret key
+    ISS-->>PUB: OFF - the new accumValue as 96 lowercase hex
+    PUB->>CC: ON - SUBMIT updateRevRegEntry with revRegDefId, accumValue and the token
+    CC->>WS: ON - overwrite the entry record, version plus one
+    CC-->>HOL: ON - RevRegEntryUpdated event carrying the new value and version
+
+    Note over HOL,ISS: WITNESS REFRESH - the ledger does not take part at all
+    HOL->>ISS: OFF - request a fresh witness
+    ISS-->>HOL: OFF - a new membership witness, never published anywhere
+
+    Note over VER,WS: PRESENTATION - the ledger takes part as two EVALUATE reads
+    VER->>CC: ON - EVALUATE getRevRegDef and getRevRegEntry
+    CC-->>VER: ON - revocationVerifyingKey, accumValue and version
+    VER-->>HOL: OFF - presentation request carrying the statement, the accumulator and a nonce
+    HOL->>HOL: OFF - THE PROOF IS PRODUCED HERE, from the witness and the accumulator
+    HOL-->>VER: OFF - presentation, bound to the request through the challenge
+    VER->>VER: OFF - record the entry version the accumulator was read at. The verdict holds against that state
+```
+
+Three properties of this method follow from the picture and are easy to lose in the prose. The non-revocation proof is produced **in the holder's own process** (message 13), from a witness the holder alone possesses. The membership witness **never reaches the ledger** in any message (2, 9). And the ledger's entire part in a presentation is **two EVALUATE reads** (10–11): the presentation itself never crosses it, and the issuer is not contacted at presentation time at all ([§10.2](#102-the-refresh-interaction-as-a-correlation-surface)).
+
+A fourth is recorded in the last message and matters outside this section. A verifier's verdict is a statement about the registry state it read, identified by the entry `version` message 11 returned, and not about that registry at any later moment. A verifier SHOULD retain that `version` alongside the verdict, and MUST pass it on where the verdict is handed to another party to act on: it is the expected version from which a conditional update is built ([§8.6](#86-revocation-registry-entry)).
+
+Source references are deliberately kept out of the diagram, where they would make it unreadable. They are here instead. Paths under `credx` are relative to the pinned crate root ([§2.4](#24-what-this-specification-pins-instead)); the others are relative to the reference deployment's repositories.
+
+| # | Step | Where it lives |
+|---|---|---|
+| 1 | credential signed, witness built | `credx` `src/issuer.rs:104-139`, witness at `:156-166` |
+| 2 | credential and witness handed to the holder | `anoncreds-vdr-demo/src/lib.rs:101-112` |
+| 3 | off-chain revocation | `anoncreds-vdr-demo/src/lib.rs:114-116` → `credx` `src/issuer.rs:307-310`, `src/revocation_registry.rs:49` |
+| 4 | `accumValue` crosses the process boundary as hex | `anoncreds-vdr-demo/src/stage3.rs:296-297`, `:344-347`; hex encoding at `:606-613` |
+| 5 | `updateRevRegEntry` submitted | `fabric-vdr-core/src/test/java/com/example/vdr/e2e/demo/AnonCredsDemoIT.java:206-213`; token minting in `.../e2e/support/TransactionExecutor.java:49-57` |
+| 6 | overwrite and `version` increment | `fabric-vdr-core/src/main/java/com/example/vdr/logic/RevRegEntryService.java:316-322` → `.../ledger/BaseRegistry.java:73-75` |
+| 7 | `RevRegEntryUpdated` emitted | `.../logic/RevRegEntryService.java:322`; event name at `.../ledger/VdrEvents.java:40` |
+| 8–9 | witness refresh | [§9.3](#93-the-refresh-interaction) of this document; `anoncreds-vdr-demo/src/lib.rs:138-143` → `credx` `src/issuer.rs:290-303` |
+| 10–11 | the two EVALUATE reads | `.../e2e/demo/AnonCredsDemoIT.java:180-183`, `:215-217`; contract entry points at `.../contract/VdrContract.java:342`, `:507` |
+| 12 | presentation request assembled | `anoncreds-vdr-demo/src/lib.rs:155-180` |
+| 13 | **the proof is produced** | `credx` `src/presentation/revocation.rs:32-52` → `src/knox/accumulator/vb20/proof.rs:104-109` |
+| 14 | presentation returned | `credx` `tests/revocation.rs:75-77` |
+| 15 | the version the verdict is tied to | the field is `fabric-vdr-core/src/main/java/com/example/vdr/model/RevRegEntryRecord.java:29`, returned by `getRevRegEntry`; its use as an expected version is [§8.6](#86-revocation-registry-entry) |
+
+### 9.6 The conditional update flow, end to end
+
+[§8.6](#86-revocation-registry-entry) specifies the conditional update as a numbered sequence. What that sequence does not show is where the check being guarded comes from, and there is exactly one interval that matters in the whole design: the one between the verifier reading a registry and the ledger committing an update conditioned on that reading. It is drawn here, in §9, for the same reason the presentation flow is: both cross the registry boundary, and both are read wrong when only the on-chain half is in view. The normative text remains in [§8.6](#86-revocation-registry-entry); nothing in this subsection adds a requirement.
+
+In the picture, X is the registry being updated and Y the registry being guarded. `OFF` marks a step that happens off ledger; `ON` marks a step the ledger takes part in.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant HOL as Holder
+    participant VER as Verifier
+    participant PUB as Publishing client - owner of X
+    participant CC as VDR chaincode
+    participant WS as World state - LevelDB
+    participant ORD as Ordering and commit validation
+
+    Note over HOL,VER: OFF LEDGER - the check the guard will be conditioned on
+    HOL-->>VER: OFF - presentation of a credential covered by registry Y
+    VER->>CC: ON - EVALUATE getRevRegEntry on Y
+    CC-->>VER: ON - the accumulator of Y and its entry version, here 3
+    VER->>VER: OFF - verify the presentation against that accumulator, then record version 3
+    VER-->>PUB: OFF - the verdict, and the version it was reached against
+
+    Note over PUB,ORD: THE CONDITIONAL UPDATE - one SUBMIT transaction
+    PUB->>PUB: OFF - recompute the accumulator of X, then serialize the guard list once
+    PUB->>PUB: OFF - compute txd over the three arguments, then sign the token
+    PUB->>CC: ON - SUBMIT updateRevRegEntryIfGuardsUnchanged with revRegDefId, accumValue, guardsJson and the token
+    CC->>CC: ON - jwt is the final argument, then the full DID-JWT profile, then the guard list rules
+    CC->>WS: ON - READ the X entry and its parent definition
+    CC->>CC: ON - owner check on X. It runs before any guard is read
+    CC->>WS: ON - READ the Y entry, in submission order
+    WS-->>CC: ON - the version Y stands at inside this transaction. ITS KEY IS NOW IN THE READ SET
+    CC->>CC: ON - compare that version with the expected 3. A mismatch rejects with FAILED PRECONDITION and writes nothing
+    CC->>WS: ON - WRITE the X entry only, version plus one. Y is never written
+    CC->>ORD: ON - endorsement response carrying the read and write sets
+    ORD->>ORD: ON - if the Y entry was written meanwhile, commit validation invalidates this transaction
+    ORD-->>PUB: ON - commit status, and on success the updated X entry with the version read for each guard
+```
+
+The interval the design turns on runs from message 3 to message 17, and two different mechanisms close it in two pieces. From the verifier's read (3) to the comparison inside the transaction (14) it is closed by the **comparison**: if Y moved in that window, the version read at 13 differs from the 3 recorded at 4, and the transaction is rejected before anything is written. From that comparison (14) through to commit (17) it is closed by the **read set**: message 12 reads Y from world state, which is what puts Y's key in this transaction's read set, and Fabric re-checks it at 17. Had Y's version instead been accepted as a transaction argument and compared against that, message 12 would not exist, Y's key would never enter the read set, and message 17 would have nothing to validate — the guarantee would reduce to an assertion that was already stale when it was made. Neither half suffices alone, which is why a guarded registry's state is never an argument.
+
+Source references are kept out of the diagram, as in [§9.5](#95-the-presentation-flow-end-to-end). They are here instead, relative to the reference implementation's repository.
+
+| # | Step | Where it lives |
+|---|---|---|
+| 2–3 | the verifier's read of Y | `fabric-vdr-core/src/main/java/com/example/vdr/contract/VdrContract.java:507` |
+| 4–5 | the version recorded with the verdict | the field is `.../model/RevRegEntryRecord.java:29`; [§9.5](#95-the-presentation-flow-end-to-end) message 15 |
+| 6 | the guard list serialized once | [§6.5](#65-transaction-binding) — the digest binds the submitted text |
+| 7 | `txd` over the three arguments | `.../logic/JwtBinding.java:60-63` |
+| 8 | submission shape | the token is the final argument, as for every other transaction ([§6.3](#63-did-jwt-profile)) |
+| 9 | token chain, then the guard list rules | `.../contract/VdrContract.java:475-476` → `:577`; `.../logic/JwtValidator.java:86-90`; guard rules at `.../logic/ValidationService.java:311-387`, bound at `:64` |
+| 10–11 | reads and owner check on X | `.../logic/RevRegEntryService.java:191` → `:290` |
+| 12–13 | **the read of Y — what the whole design rests on** | `.../logic/RevRegEntryService.java:262-273`, through `.../ledger/BaseRegistry.java:58-59` |
+| 14 | the comparison, first mismatch deciding | `.../logic/RevRegEntryService.java:229-248`, driven by the loop at `:193-196` |
+| 15 | write confined to X | `.../logic/RevRegEntryService.java:316-322` |
+| 16–17 | endorsement and commit-time validation | [§5.3](#53-endorsement-ordering-and-mvcc) |
+| 18 | the two version fields of the response | `.../contract/VdrContract.java:480-493`; defined in [§8.6](#86-revocation-registry-entry) |
+
 ---
 
 ## 10. Security considerations
@@ -962,6 +1214,24 @@ The reference network defines one organisation with two peers and no explicit en
 
 Production deployments SHOULD define a multi-organisation endorsement policy. Nothing in this method's object model depends on the single-organisation shape.
 
+### 10.9 What the conditional update guarantees, and what it does not
+
+The conditional update of [§8.6](#86-revocation-registry-entry) is a narrow instrument, and both its edges are worth stating, because each of them is easy to over-read in the direction of the other.
+
+**What it guarantees.** For the update it is attached to, and only that one: every guarded registry was unchanged from the version the publisher observed through to this transaction's own commit. Nothing is promised about any guarded registry after that commit. As a direct consequence, **at most one of a set of mutually conditional updates can commit** — if each competing publisher updates through this path and names the others as guards, the first to commit moves a registry that every other one guards, and every other one is then refused or invalidated. *Which* one commits is not determined by this method: it is whichever transaction Fabric orders and validates first, and a publisher MUST NOT build on any expectation about the winner.
+
+That property holds **only if every competing party takes this path**. It is a property of a set of updates, not of a single one. If one competitor writes through `updateRevRegEntry`, its write is conditioned on nothing, and it can commit before or after a conditional update that guards its registry, leaving both in effect. A publisher whose correctness depends on the at-most-one property MUST use the conditional path, and MUST NOT assume any other party is using it unless its own protocol compels that party to.
+
+**The price is liveness.** A guard rejects on *any* committed write to a guarded registry, including one that has nothing to do with the credential the publisher cared about — the registry performs no accumulator cryptography and cannot tell the two apart ([§8.1.4](#814-validation-scope)). In a busy registry this makes rejection common rather than exceptional. The two rejection modes do not cost the same, and deployers SHOULD know which one they are getting. A guard that already fails at endorsement is refused with `FAILED_PRECONDITION` and never reaches the ordering service: nothing enters a block. A guard that held at endorsement but whose registry was written before this transaction committed is invalidated by MVCC at commit time: the transaction occupies a block slot and is recorded as invalid, having written nothing.
+
+**A retry is a new operation, not a repetition.** Both rejection modes leave the publisher with the same task, and it is larger than resubmitting. The token is consumed, so a fresh one MUST be minted ([§6.6](#66-one-time-use)). More consequentially, the new expected version names a **different state** of the guarded registry — that is precisely why the first attempt failed — so the off-chain check the whole operation was conditioned on MUST be performed again, against that new state, before the retry is submitted. A publisher that keeps the original verdict and only refreshes the version numbers has inverted the point of the mechanism: the registry would then be guaranteeing the stability of a state that nobody checked.
+
+**The window the guard covers, and the one it does not.** A guard covers the interval from the state the publisher observed to its own commit. It says nothing about the registry *before* that observation. If a guarded registry's owner rewound its accumulator prior to the observation, the observation itself was of a rewound state, and a guard on it faithfully preserves exactly that ([§8.6](#86-revocation-registry-entry), accumulator monotonicity).
+
+**The same trust assumption, from the other side: the issuer holds a trapdoor.** The accumulator's secret key lets its holder compute a valid membership witness for any element — one it revoked, or one it never issued — and a non-revocation proof built from such a witness verifies against the published accumulator like any other. The verifier's off-chain check therefore establishes that the holder's proof is consistent with a state the issuer published; it does not establish, independently of that issuer, that the credential is unrevoked. Both the rewind above and the forged witness here reduce to one assumption: the issuer is trusted about the state of its own registry. The conditional update neither weakens nor strengthens that assumption — it guarantees that the state the verifier examined was still the current state at commit, not that the issuer was honest when publishing it. Excluding issuer forgery is an open problem outside this method ([§11.7](#117-conditional-revocation-what-remains-open)).
+
+**What a publisher cannot lie about.** A guard contributes an identifier and an expected version, and nothing else. The state it is compared against is read by the registry from world state inside the transaction, never accepted as an argument, so a publisher cannot misrepresent a guarded registry's condition to the registry — the worst it can do is name a version that does not match, which rejects. Both values a guard carries are public: the identifier and the version are readable by any channel member through `getRevRegEntry`, and a submitted guard list is recorded in the block store like every other argument ([§10.6](#106-submitted-tokens-are-visible-channel-wide)). The conditional path therefore discloses nothing that was not already disclosed, other than the fact that this publisher chose to condition on those registries.
+
 ---
 
 ## 11. Open items and future work
@@ -1013,12 +1283,22 @@ The `did:vdr` identifiers used throughout this document's examples have **no pub
 
 Deployments MAY use any DID method whose documents can be registered here in the required shape. A future round could either specify `did:vdr` properly or move the reference deployment to an already-specified method.
 
-### 11.7 Other deferred items
+### 11.7 Conditional revocation: what remains open
+
+The conditional update is specified in [§8.6](#86-revocation-registry-entry), drawn in [§9.6](#96-the-conditional-update-flow-end-to-end), and bounded in [§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not). Two questions about it are genuinely unresolved and are recorded here.
+
+**A guard rejects on any change, not only on a relevant one.** A guard asks whether a registry has been written since a stated version. It cannot ask whether that write affected the credential the publisher's decision rested on, because answering that would require the registry to reason about accumulator membership, and the chaincode carries no pairing library and performs no accumulator cryptography ([§8.1.4](#814-validation-scope)) — a boundary this method keeps. The cost is liveness: in a registry with many credentials, a revocation unrelated to the guarded credential rejects a conditional update just as a related one would. A finer condition would need either evidence the registry can check without pairing arithmetic, or a decomposition of registry state that makes "did this change touch element *e*?" answerable from the record shape alone. Neither is specified here, and neither is a small change: both alter what the entry record holds, not only what the transaction checks.
+
+**Which of several mutually conditional updates commits is not determined by this method.** At most one can ([§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not)), and the one that does is whichever Fabric orders and validates first. For the use this method was built for — the branches of a single decision, where exactly one outcome must take effect and which one is immaterial — that is the correct answer. A deployment that needs a *particular* competitor to win, by priority, seniority, or any other rule, has an ordering requirement this method does not address, and would have to express it above the registry: nothing in the transaction, in the guard list, or in Fabric's validation offers a place to put it.
+
+### 11.8 Other deferred items
 
 - **Nonce housekeeping.** Consumed `jti` records are written with their token expiry so they are prunable, but no pruning transaction exists. The `JWTNONCE` namespace grows without bound.
 - **Pagination.** The `list*` transactions scan an entire namespace with no pagination and will not scale.
 - **Verification method flexibility.** Every verification method in a DID document must currently be `JsonWebKey2020` / EC P-256, not merely the one a token selects.
 - **Deletion tombstones.** The history element shape reserves a `deleted` flag, but no transaction produces one.
+- **Accumulator monotonicity.** `updateRevRegEntry` writes the submitted accumulator value unconditionally, so a registry owner can republish a value that entry previously held and thereby revalidate witnesses and proofs that were stale. The conditional update does not close this: its precondition is stated over `version`, which a rewind advances like any other write, and the owner of an entry can always satisfy a guard on its own entry. Closing it would require the registry to decide whether one accumulator value succeeds another — an ordering over group elements that no field of the record expresses and that the chaincode cannot compute ([§8.1.4](#814-validation-scope)). The consequence as it stands is set out in [§8.6](#86-revocation-registry-entry).
+- **One reading for every JSON argument, not only for `guardsJson`.** [§8.6](#86-revocation-registry-entry) requires the conditional update's guard list to have exactly one reading: precisely one JSON value in the argument, and no member name repeated in any object. The method's other JSON-carrying arguments — `didDocumentJson`, `attrNamesJson`, `publicMetadataJson`, `publicKeysJson` — carry no such requirement, and the reference implementation reads all four the way most parsers do by default: a repeated member name silently resolves to the last occurrence, and anything following the first complete JSON value goes unread. Each of them is inside the `txd` digest wherever it travels on a JWT-gated transaction ([§6.5](#65-transaction-binding)) — which is every transaction carrying `attrNamesJson`, `publicMetadataJson` or `publicKeysJson`, and `updateDid` for `didDocumentJson` — and each of them is recorded verbatim in the block store whichever transaction carried it. The same byte string can therefore mean one thing to the registry and another to any party that reads it back with a different parser, and where it was signed, the signature covers a string with two meanings. The one argument that does not reach everywhere is the digest one: `createDid` takes no token at all ([§6.3](#63-did-jwt-profile)), so `didDocumentJson` arrives there with no digest to undermine. The audit-trail concern applies to that path unchanged, and the one that follows applies to it with more force rather than less, precisely because nothing is signed. **`didDocumentJson` is the serious case**, and not only an audit-trail one: a DID document with two `verificationMethod` members is read as having whichever the parser keeps, and the verification method is what selects the key against which every subsequent token of that issuer is verified. Closing the gap means extending the `guardsJson` rule to those four arguments. It is deferred because it changes the behaviour of transactions that exist today — payloads the registry currently accepts would begin to be rejected — which is a specification change with its own compatibility discussion, not a clarification. In practice no well-formed client emits such a payload; the exposure is to a malformed or deliberately ambiguous one.
 
 ---
 
@@ -1049,6 +1329,31 @@ Deployments MAY use any DID method whose documents can be registered here in the
 ---
 
 ## 13. Changelog
+
+### 0.3.0 — 2026-09-22
+
+One new normative transaction, and the consequences of having it. Substantive content:
+
+- **Conditional update of a revocation registry entry ([§8.6](#86-revocation-registry-entry)).** Specified `updateRevRegEntryIfGuardsUnchanged` as a numbered normative sequence alongside the unconditional update: the guard list and its validation rules, the ordering of the checks and the reasons the order is fixed, a guard on the entry being updated as a compare-and-swap, the two version fields of the response and the rule for chaining calls, and the error codes including the new `FAILED_PRECONDITION`. A guarded entry that does not exist is `NOT_FOUND` and matches no expected version, `0` included; `guardsJson` has exactly one reading, with repeated member names and trailing content rejected.
+- **Stated normatively that every committed write of an entry after creation advances its `version` by exactly one ([§8.6](#86-revocation-registry-entry)).** The chaining rule and the version-equals-state argument both rest on it, so it is now a requirement on the registry rather than an observation about one implementation. `checkedVersion` was likewise made normative in its provenance: it carries the version the registry read inside the transaction, and MUST NOT echo the submitted expected value.
+- **Stated that `updateRevRegEntry` carries no cross-registry guarantee ([§8.6](#86-revocation-registry-entry), [§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not)),** that this is measured behaviour of the reference implementation, that the conditional path is opt-in and the at-most-one property holds only among mutually conditional updates, and that the unconditional path is **not** deprecated.
+- Refined the closing sentence of the update sequence ([§8.6](#86-revocation-registry-entry)): a client MAY submit an expected `version` as a precondition, which the registry compares against a value it read inside the transaction and never stores — a complement to that read, never a substitute for it.
+- Added the transaction-binding rule for `guardsJson` ([§6.5](#65-transaction-binding)): the digest covers the submitted text, there is no canonical form, and a publisher MUST sign the exact string it submits.
+- Recorded in the chaincode-event table ([§5.5](#55-chaincode-events)) that `RevRegEntryUpdated` is emitted by both update transactions, and stated why the conditional path reuses that event name and payload rather than taking one of its own: a separate name would leave every witness-refresh subscriber blind to the accumulator changes published by the registries that adopt it.
+- Added the conditional update flow end to end ([§9.6](#96-the-conditional-update-flow-end-to-end)) and a security-considerations subsection on what the guarantee covers, its liveness price, and why a retry is a new operation ([§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not)).
+- Rewrote [§11.7](#117-conditional-revocation-what-remains-open) down to what is actually still open — the coarseness of the guard and the undetermined winner — and removed the superseded proof-verifying variant, its diagram and its status note. Recorded a new deferred item in [§11.8](#118-other-deferred-items): the one-reading rule covers `guardsJson` only, while the method's four other JSON arguments still admit two readings, `didDocumentJson` most consequentially. Made the accumulator-monotonicity item precise: the conditional update does not close it.
+- Recorded in [§9.5](#95-the-presentation-flow-end-to-end) that a verifier retains the entry `version` its verdict was reached against, which is the expected version a conditional update is built from.
+- Restated the accumulator trapdoor in [§10.9](#109-what-the-conditional-update-guarantees-and-what-it-does-not), next to the pre-observation rewind, as the same trust assumption on the issuer: a forged witness verifies like a genuine one, so the off-chain check presumes the issuer's honesty about its own registry, and the conditional update does not change that. The limit had lived in the former §11.7 and would otherwise have left the document with its rewrite.
+
+### 0.2.0 — 2026-09-21
+
+Corrections against the reference implementation and deployment, and one normative clarification. Substantive content:
+
+- **Normative clarification ([§8.6](#86-revocation-registry-entry)).** The concurrency guarantee of `updateRevRegEntry` is carried by the entry's `version`, not by its `accumValue`; the rationale is given in full. Stated explicitly that accumulator monotonicity is not enforced — revocation is not irreversible at the registry — and added the requirement that a resolver or verifier depending on forward-only movement MUST establish it from the revision history.
+- The issuer of an object is derived from its identifier ([§6.8](#68-verifying-publisher-control), [§7.7](#77-issuer-control-by-construction)). Object-creating transactions take no issuer argument; §7.7 previously stated the reverse. The signatures and `txd` argument counts of `createSchema`, `createCredDef` and `createRevRegDef` ([§8.3](#83-schema)–[§8.5](#85-revocation-registry-definition)) lose the `issuerId` parameter accordingly (five to four, six to five, six to five non-JWT arguments).
+- Stated that the reference deployment's state database is LevelDB and that the method is written for that shape: point lookups and ordered range scans only, no rich queries ([§5.1](#51-channel-chaincode-world-state)).
+- Added the end-to-end presentation flow ([§9.5](#95-the-presentation-flow-end-to-end)).
+- Recorded conditional revocation as planned, non-normative work ([§11.7](#117-conditional-revocation-what-remains-open), rewritten in 0.3.0), with a status note that the proof-verifying variant drawn there has since been superseded. The former §11.7 is now [§11.8](#118-other-deferred-items) and lists accumulator monotonicity as a deferred item.
 
 ### 0.1.0 — 2026-08-13
 
