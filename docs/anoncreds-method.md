@@ -1084,15 +1084,15 @@ Source references are deliberately kept out of the diagram, where they would mak
 | 2 | credential and witness handed to the holder | `anoncreds-vdr-demo/src/lib.rs:101-112` |
 | 3 | off-chain revocation | `anoncreds-vdr-demo/src/lib.rs:114-116` → `credx` `src/issuer.rs:307-310`, `src/revocation_registry.rs:49` |
 | 4 | `accumValue` crosses the process boundary as hex | `anoncreds-vdr-demo/src/stage3.rs:296-297`, `:344-347`; hex encoding at `:606-613` |
-| 5 | `updateRevRegEntry` submitted | `fabric-vdr-core/src/test/java/com/example/vdr/e2e/demo/AnonCredsDemoIT.java:206-213`; token minting in `.../e2e/support/TransactionExecutor.java:49-57` |
-| 6 | overwrite and `version` increment | `fabric-vdr-core/src/main/java/com/example/vdr/logic/RevRegEntryService.java:316-322` → `.../ledger/BaseRegistry.java:73-75` |
+| 5 | `updateRevRegEntry` submitted | `fabric-vdr-core/src/test/java/io/github/snktibor/vdr/e2e/demo/AnonCredsDemoIT.java:206-213`; token minting in `.../e2e/support/TransactionExecutor.java:49-57` |
+| 6 | overwrite and `version` increment | `fabric-vdr-core/src/main/java/io/github/snktibor/vdr/logic/RevRegEntryService.java:316-322` → `.../ledger/BaseRegistry.java:73-75` |
 | 7 | `RevRegEntryUpdated` emitted | `.../logic/RevRegEntryService.java:322`; event name at `.../ledger/VdrEvents.java:40` |
 | 8–9 | witness refresh | [§9.3](#93-the-refresh-interaction) of this document; `anoncreds-vdr-demo/src/lib.rs:138-143` → `credx` `src/issuer.rs:290-303` |
 | 10–11 | the two EVALUATE reads | `.../e2e/demo/AnonCredsDemoIT.java:180-183`, `:215-217`; contract entry points at `.../contract/VdrContract.java:342`, `:507` |
 | 12 | presentation request assembled | `anoncreds-vdr-demo/src/lib.rs:155-180` |
 | 13 | **the proof is produced** | `credx` `src/presentation/revocation.rs:32-52` → `src/knox/accumulator/vb20/proof.rs:104-109` |
 | 14 | presentation returned | `credx` `tests/revocation.rs:75-77` |
-| 15 | the version the verdict is tied to | the field is `fabric-vdr-core/src/main/java/com/example/vdr/model/RevRegEntryRecord.java:29`, returned by `getRevRegEntry`; its use as an expected version is [§8.6](#86-revocation-registry-entry) |
+| 15 | the version the verdict is tied to | the field is `fabric-vdr-core/src/main/java/io/github/snktibor/vdr/model/RevRegEntryRecord.java:29`, returned by `getRevRegEntry`; its use as an expected version is [§8.6](#86-revocation-registry-entry) |
 
 ### 9.6 The conditional update flow, end to end
 
@@ -1139,7 +1139,7 @@ Source references are kept out of the diagram, as in [§9.5](#95-the-presentatio
 
 | # | Step | Where it lives |
 |---|---|---|
-| 2–3 | the verifier's read of Y | `fabric-vdr-core/src/main/java/com/example/vdr/contract/VdrContract.java:507` |
+| 2–3 | the verifier's read of Y | `fabric-vdr-core/src/main/java/io/github/snktibor/vdr/contract/VdrContract.java:507` |
 | 4–5 | the version recorded with the verdict | the field is `.../model/RevRegEntryRecord.java:29`; [§9.5](#95-the-presentation-flow-end-to-end) message 15 |
 | 6 | the guard list serialized once | [§6.5](#65-transaction-binding) — the digest binds the submitted text |
 | 7 | `txd` over the three arguments | `.../logic/JwtBinding.java:60-63` |

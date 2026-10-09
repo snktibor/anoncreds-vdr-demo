@@ -139,7 +139,7 @@ the accumulator, and that new value is now the registry's committed state.
 Maven should report exactly one test:
 
 ```
-Tests run: 1, Failures: 0, Errors: 0, Skipped: 0 -- in com.example.vdr.e2e.demo.AnonCredsDemoIT
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0 -- in io.github.snktibor.vdr.e2e.demo.AnonCredsDemoIT
 ```
 
 **`[4/4] credx verifies the ledger's answer`** — the payoff. The Rust side rebuilds an
