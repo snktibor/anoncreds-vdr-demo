@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "anoncreds-vdr-demo: AnonCreds v2 revocation over a Hyperledger Fabric Verifiable Data Registry"
+type: software
+authors:
+  - family-names: Sinka
+    given-names: Tibor
+    affiliation: "Budapest University of Technology and Economics"
+repository-code: "https://github.com/snktibor/anoncreds-vdr-demo"
+license: Apache-2.0
+keywords:
+  - hyperledger-fabric
+  - verifiable-data-registry
+  - anoncreds
+  - self-sovereign-identity
+  - revocation

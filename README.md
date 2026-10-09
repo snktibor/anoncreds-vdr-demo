@@ -230,4 +230,5 @@ constraint stays visible rather than becoming folklore.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Report security issues
+as [SECURITY.md](SECURITY.md) describes; to cite this demo, use [CITATION.cff](CITATION.cff).

@@ -6,3 +6,7 @@ project, an AnonCreds v2 interoperability demonstration running against the
 fabric-vdr-core Verifiable Data Registry chaincode on Hyperledger Fabric.
 
 Licensed under the Apache License, Version 2.0 (see the LICENSE file).
+
+The `fablo` script is the Fablo CLI launcher, version 2.6.0, from
+https://github.com/hyperledger-labs/fablo, licensed under the Apache License,
+Version 2.0.

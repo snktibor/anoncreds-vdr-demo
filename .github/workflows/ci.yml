@@ -1,0 +1,31 @@
+name: Rust demo
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  in-process-demo:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Cache cargo registry, git sources and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      # The stages that need a live Fabric network (emit, the Java harness, verify)
+      # are exercised by ./run-anoncreds-demo.sh, not here. Without arguments the
+      # binary runs the in-memory revocation lifecycle and fails on any deviation.
+      - name: Build
+        run: cargo build --locked
+      - name: Run the in-process revocation lifecycle
+        run: cargo run --locked
