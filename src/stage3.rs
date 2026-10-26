@@ -5,9 +5,9 @@
 //! two halves meet over a JSON file rather than a function call:
 //!
 //! 1. [`emit`] runs the credx lifecycle and writes `bundle.json`, the material a
-//!    publisher needs to drive the VDR transactions, in the `docs/anoncreds-method.md`
-//!    §8.1.6 wire shape. Alongside it, `session.json` keeps the credx objects this
-//!    process must hold on to in order to check the ledger's answer later.
+//!    publisher needs to drive the VDR transactions, in the wire shape of §8.1.6 of
+//!    `fabric-vdr-core/docs/anoncreds-method.md`. Alongside it, `session.json` keeps the
+//!    credx objects this process must hold on to in order to check the ledger's answer later.
 //! 2. The Java harness reads `bundle.json`, publishes every object, reads each one
 //!    back, and writes what the ledger returned to `vdr-report.json`.
 //! 3. [`verify`] reassembles an [`IssuerPublic`] from the *returned* values using the
@@ -46,7 +46,7 @@ const CRED_DEF_TAG: &str = "tag-1";
 const SCHEMA_NAME: &str = "employee-credential";
 const SCHEMA_VERSION: &str = "1.0";
 // VB20 places no cryptographic bound on registry size; this is the issuer's declared
-// capacity statement only (docs/anoncreds-method.md §8.2).
+// capacity statement only (fabric-vdr-core/docs/anoncreds-method.md §8.2).
 const MAX_CRED_NUM: u64 = 1000;
 
 const ALICE_CREDENTIAL_ID: &str = "stage3-alice-credential";

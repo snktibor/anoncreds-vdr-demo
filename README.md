@@ -87,7 +87,6 @@ scratch.
 | `fablo`, `fablo-config.json` | pinned [Fablo](https://github.com/hyperledger-labs/fablo) 2.6.0 CLI and the network topology: Fabric 2.5.15, TLS, one `solo` orderer, `Org1MSP` with two peers, channel `my-channel1`, `vdrchaincode` 0.0.7 deployed as Chaincode-as-a-Service |
 | `Cargo.toml`, `src/` | the Rust demo — credx crypto, the wire bundle, the verification |
 | `docs/anoncreds-demo.md` | the walkthrough: prerequisites, expected output, clean-vs-resume, failure injection |
-| `docs/anoncreds-method.md` | the AnonCreds v2 objects method this VDR implements |
 
 `fablo-target/`, `chaincode-packages/`, `target/` and the `fabric-vdr-core/` clone are all
 gitignored and regenerated.
@@ -161,7 +160,7 @@ paths the harness needs from outside its own repository — `VDR_E2E_CRYPTO_PATH
 ### The three files
 
 `bundle.json` is the publisher-facing artifact, in the
-[`docs/anoncreds-method.md`](docs/anoncreds-method.md) §8.1.6 wire shape. It
+[Hyperledger Fabric AnonCreds Method](https://github.com/snktibor/fabric-vdr-core/blob/main/docs/anoncreds-method.md) §8.1.6 wire shape. It
 carries only what the harness needs to drive transactions — and deliberately no
 DID key material, since a P-256 DID key is unrelated to the credx BLS material
 and the harness mints its issuer DID fresh per run:
